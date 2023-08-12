@@ -1,36 +1,79 @@
+#!/usr/bin/python3
+
 import os
-import sys
 import hashlib
+import subprocess
+import argparse
+import uuid
+import shutil
+
+VIDEO_FORMAT = ".mp4"
+YT_DLP_PATH = "/usr/local/bin/yt-dlp"
+FFMPEG_PATH = "ffmpeg"
+
+def check_dependencies():
+    dependencies = [YT_DLP_PATH, FFMPEG_PATH, "aria2c"]
+    for dep in dependencies:
+        if shutil.which(dep) is None:
+            raise EnvironmentError(f"Required binary '{dep}' not found. Please ensure it's installed and available in PATH.")
 
 def compute_md5(filename):
+    hash_md5 = hashlib.md5()
     with open(filename, "rb") as f:
-        return hashlib.md5(f.read()).hexdigest()
+        for chunk in iter(lambda: f.read(4096), b""):
+            hash_md5.update(chunk)
+    return hash_md5.hexdigest()
 
-def download_and_cut_video(url, start, stop):
-    output_file = "downloaded_video.mp4"
-    download_command = f"/usr/local/bin/yt-dlp -f bestvideo+bestaudio/best -o {output_file} {url}"
-    os.system(download_command)
+def run_command(command_list, msg):
+    print(msg)
+    process = subprocess.Popen(command_list, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout, stderr = process.communicate()
+    if process.returncode != 0:
+        raise RuntimeError(f"Command failed with error: {stderr.decode()}")
 
-    trimmed_output_file = "trimmed_video.mp4"
-    cut_command = f"ffmpeg -i {output_file} -ss {start} -to {stop} -c:v copy -c:a copy {trimmed_output_file}"
-    os.system(cut_command)
+def download_and_cut_video(url, start, stop, output_directory="."):
+    temp_video_name = f"{uuid.uuid4()}{VIDEO_FORMAT}"
+    trimmed_temp_name = f"{uuid.uuid4()}{VIDEO_FORMAT}"
 
-    md5_hash = compute_md5(trimmed_output_file)
-    final_output_file = f"{md5_hash}.mp4"
-    os.rename(trimmed_output_file, final_output_file)
+    try:
+        run_command(
+            [YT_DLP_PATH, "--external-downloader", "aria2c", "-f", "bestvideo+bestaudio/best", "-o", temp_video_name, url],
+            "Downloading video with yt-dlp..."
+        )
 
-    os.remove(output_file)
+        run_command(
+            [FFMPEG_PATH, "-i", temp_video_name, "-ss", start, "-to", stop, "-c:v", "copy", "-c:a", "copy", trimmed_temp_name],
+            "Trimming video with ffmpeg..."
+        )
 
-    print(f"Trimmed video saved as {final_output_file}")
+        md5_hash = compute_md5(trimmed_temp_name)
+        final_output_file_name = f"{md5_hash}{VIDEO_FORMAT}"
+        final_output_file_path = os.path.join(output_directory, final_output_file_name)
+        os.rename(trimmed_temp_name, final_output_file_path)
 
+    finally:
+        if os.path.exists(temp_video_name):
+            os.remove(temp_video_name)
+
+    print(f"Trimmed video saved as {final_output_file_path}")
 
 if __name__ == "__main__":
-    if len(sys.argv) != 4:
-        print("Usage: download-and-trim.py <video_url> <start_time> <end_time>")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="Download and trim videos using yt-dlp and ffmpeg.")
+    parser.add_argument("video_url", help="URL of the video to be downloaded.")
+    parser.add_argument("start_time", help="Start time for trimming (e.g., 00:00:21).")
+    parser.add_argument("end_time", help="End time for trimming (e.g., 00:01:10).")
+    parser.add_argument("-d", "--directory", default=".", help="Output directory for the final video. Defaults to the current directory.")
     
-    video_url = sys.argv[1]
-    start_time = sys.argv[2]
-    end_time = sys.argv[3]
+    args = parser.parse_args()
 
-    download_and_cut_video(video_url, start_time, end_time)
+    output_directory = args.directory
+
+    if not os.path.exists(output_directory):
+        os.makedirs(output_directory)
+
+    try:
+        check_dependencies()
+        download_and_cut_video(args.video_url, args.start_time, args.end_time, output_directory)
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)
